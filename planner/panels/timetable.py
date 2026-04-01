@@ -1,16 +1,7 @@
 """planner/panels/timetable.py — Weekly timetable view.
 
-Key design decisions
---------------------
-* The main canvas does NOT scroll.  Hour-height (HH) is auto-scaled so the
-  full time range fits the available height.
-* Visibility sidebar canvas uses middle-mouse / Button-4/5 scroll via
-  bind_scroll().
-* Day set is driven by data.json meta.days with two optional toggles:
-    - Show extended work days  → appends Saturday
-    - Show weekends            → appends Saturday + Sunday
-  (Both off by default.)
-* SLOT_TYPES are pulled from data.json meta.slot_types.
+Key fix: rebind_scroll_children() is called at the end of refresh_visibility()
+so the Show/Hide course list can actually be scrolled after it is populated.
 """
 
 import json
@@ -23,7 +14,7 @@ from planner.constants import (
 )
 from planner.utils.io_utils import get_slot_types, get_days, get_day_full
 from planner.utils.math_utils import parse_time, hex_darken, hex_blend, assign_columns
-from planner.utils.scroll_utils import bind_scroll
+from planner.utils.scroll_utils import bind_scroll, rebind_scroll_children
 
 _DEFAULT_SLOT_TYPES = ["Lecture", "Tutorial", "Exercise", "Lab", "Help Session", "Other"]
 
@@ -69,7 +60,6 @@ class TimetablePanel:
         if cur not in sems:
             self.sem_var.set(sems[-1] if sems else "")
 
-        # Sync slot-type checkboxes with data
         self._sync_type_controls()
         self._switch_semester()
 
@@ -81,7 +71,6 @@ class TimetablePanel:
 
     # ── UI skeleton ───────────────────────────────────────────────────────────
     def _build_ui(self):
-        # Top bar
         topbar = tk.Frame(self.frame, bg=CRUST, height=52)
         topbar.pack(fill=tk.X)
         topbar.pack_propagate(False)
@@ -96,17 +85,14 @@ class TimetablePanel:
         self.sem_cb.pack(side=tk.LEFT, pady=14, padx=4)
         self.sem_cb.bind("<<ComboboxSelected>>", self._switch_semester)
 
-        # Body
         body = tk.Frame(self.frame, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
 
-        # ── Main canvas (NO scrollbars, auto-scaled HH) ──────────────────────
         self.canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
                          padx=(10, 0), pady=10)
         self.canvas.bind("<Configure>", lambda e: self.draw_timetable())
 
-        # ── Sidebar ──────────────────────────────────────────────────────────
         sb = tk.Frame(body, bg=MANTLE, width=296)
         sb.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0), pady=10)
         sb.pack_propagate(False)
@@ -210,7 +196,6 @@ class TimetablePanel:
     def _build_options_tab(self):
         f = self.tab_options
 
-        # ── Days ─────────────────────────────────────────────────────────────
         self._ph(f, "📆  Days")
         dr = tk.Frame(f, bg=BG)
         dr.pack(fill=tk.X, padx=14, pady=(0, 6))
@@ -231,7 +216,6 @@ class TimetablePanel:
             font=("Segoe UI", 9), cursor="hand2",
         ).pack(anchor="w")
 
-        # ── Time range ───────────────────────────────────────────────────────
         self._ph(f, "🕐  Time Range", top=14)
         tr = tk.Frame(f, bg=BG)
         tr.pack(fill=tk.X, padx=14, pady=(0, 6))
@@ -247,11 +231,9 @@ class TimetablePanel:
             cb.grid(row=0, column=col + 1, padx=6)
             cb.bind("<<ComboboxSelected>>", lambda e: self.draw_timetable())
 
-        # ── Filter by type ────────────────────────────────────────────────────
         self._ph(f, "🏷  Filter by Type", top=14)
         self._type_frame = tk.Frame(f, bg=BG)
         self._type_frame.pack(fill=tk.X, padx=14)
-        # Seed with defaults; will be refreshed from data on reload()
         for t in _DEFAULT_SLOT_TYPES:
             v = tk.BooleanVar(value=True)
             self.type_vars[t] = v
@@ -301,7 +283,6 @@ class TimetablePanel:
     def draw_timetable(self):
         self.canvas.delete("all")
 
-        # Determine day list
         base_days = get_days(self.data) if self.data else ["Mon","Tue","Wed","Thu","Fri"]
         day_full  = get_day_full(self.data) if self.data else {}
         days = list(base_days)
@@ -312,7 +293,6 @@ class TimetablePanel:
             if "Sun" not in days:
                 days.append("Sun")
 
-        # Time bounds
         try:
             sh = int(self.start_h.get())
             eh = int(self.end_h.get())
@@ -326,7 +306,6 @@ class TimetablePanel:
         TW  = 54
         HDR = 46
 
-        # Auto-scale: no scrolling — fit all hours in available height
         HH    = max(28, (ch - HDR - 10) // (eh - sh))
         DAY_W = max(110, (cw - TW - 18) // len(days))
         TOT_W = TW + len(days) * DAY_W + 4
@@ -335,7 +314,6 @@ class TimetablePanel:
         self.canvas.configure(scrollregion=(0, 0, TOT_W, TOT_H))
         self.canvas.create_rectangle(0, 0, TOT_W, TOT_H, fill=BG, outline="")
 
-        # Day column backgrounds
         for i in range(len(days)):
             x0 = TW + i * DAY_W
             x1 = x0 + DAY_W
@@ -343,7 +321,7 @@ class TimetablePanel:
                 x0, HDR, x1, TOT_H,
                 fill=SURFACE0 if i % 2 == 0 else BG, outline="")
 
-        # Hour lines
+        import math
         for h in range(sh, eh + 1):
             y = HDR + (h - sh) * HH
             self.canvas.create_line(TW, y, TOT_W, y, fill=SURFACE1, width=1)
@@ -369,12 +347,10 @@ class TimetablePanel:
                         self.canvas.create_line(TW - 4, yy, TW, yy,
                                                 fill=OVERLAY, width=1)
 
-        # Vertical separators
         for i in range(len(days) + 1):
             x = TW + i * DAY_W
             self.canvas.create_line(x, HDR, x, TOT_H, fill=SURFACE1, width=1)
 
-        # Header row
         self.canvas.create_rectangle(0, 0, TOT_W, HDR, fill=MANTLE, outline="")
         self.canvas.create_line(0, HDR, TOT_W, HDR, fill=SURFACE1, width=1)
         for i, day in enumerate(days):
@@ -385,7 +361,6 @@ class TimetablePanel:
                 text=day_full.get(day, day).upper(),
                 fill=FG, font=("Segoe UI", 9, "bold"))
 
-        # Events
         active_types = ({t for t, v in self.type_vars.items() if v.get()}
                         if self.type_vars else set(_DEFAULT_SLOT_TYPES))
 
@@ -616,6 +591,9 @@ class TimetablePanel:
             if bm:
                 tk.Label(col_f, text=bm, bg=BG, fg=OVERLAY,
                          font=("Segoe UI", 7)).pack(anchor="w")
+
+        # ── KEY FIX: re-bind scroll on all newly created widgets ──────────────
+        rebind_scroll_children(self.vis_canvas, self.vis_frame)
         self._vis_resize()
 
     def _toggle(self, cid, var):

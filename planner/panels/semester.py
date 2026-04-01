@@ -1,4 +1,9 @@
-"""planner/panels/semester.py — Per-semester course table with exam tracking."""
+"""planner/panels/semester.py — Per-semester course table with exam tracking.
+
+Key fix: the entire table (header + all data rows + totals) lives inside a
+single tk.Frame whose columns are configured ONCE.  Every row is placed with
+.grid() into that frame, so columns are guaranteed to line up perfectly.
+"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox, colorchooser
@@ -16,20 +21,22 @@ from planner.utils.scroll_utils import bind_scroll, rebind_scroll_children
 
 class SemesterPanel:
     COL_DEFS = [
-        ("No",            40),
-        ("Course Name",   260),
-        ("Base Module",   140),
-        ("Specific Module", 150),
-        ("Credits",       62),
-        ("Exam Given?",   80),
-        ("Credits\nObtainable", 80),
-        ("Exam Date",     90),
-        ("Exam Time",     70),
-        ("Alt Date",      90),
-        ("Alt Time",      70),
-        ("Additional Info", 160),
-        ("",              40),
+        ("No",               40),
+        ("Course Name",     240),
+        ("Base Module",     130),
+        ("Specific Module", 140),
+        ("Credits",          58),
+        ("Exam\nGiven?",     68),
+        ("Credits\nObtained", 72),
+        ("Exam Date",        88),
+        ("Exam Time",        66),
+        ("Alt Date",         88),
+        ("Alt Time",         66),
+        ("Additional Info", 155),
+        ("",                 36),
     ]
+    # Total natural width
+    _NAT_W = sum(w for _, w in COL_DEFS)   # ≈ 1251 px
 
     def __init__(self, container: tk.Frame, hub):
         self.hub       = hub
@@ -85,6 +92,7 @@ class SemesterPanel:
 
         wrap = tk.Frame(self.frame, bg=BG)
         wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+
         vsb = tk.Scrollbar(wrap, orient=tk.VERTICAL, bg=SURFACE1,
                            troughcolor=SURFACE0, relief=tk.FLAT,
                            highlightthickness=0)
@@ -93,20 +101,27 @@ class SemesterPanel:
                            troughcolor=SURFACE0, relief=tk.FLAT,
                            highlightthickness=0)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
+
         self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0,
                                 yscrollcommand=vsb.set,
                                 xscrollcommand=hsb.set)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.configure(command=self.canvas.yview)
         hsb.configure(command=self.canvas.xview)
+
         self.table_frame = tk.Frame(self.canvas, bg=BG)
         self._win = self.canvas.create_window(
             (0, 0), window=self.table_frame, anchor="nw")
+
         self.table_frame.bind("<Configure>", self._on_resize)
-        self.canvas.bind("<Configure>", self._on_resize)
+        self.canvas.bind("<Configure>",      self._on_resize)
         bind_scroll(self.canvas, h_canvas=self.canvas)
 
     def _on_resize(self, _=None):
+        # Always stretch the inner frame to at least the canvas width so there
+        # is no wasted horizontal space and no spurious horizontal scrollbar.
+        cw = self.canvas.winfo_width()
+        self.canvas.itemconfigure(self._win, width=max(cw, self._NAT_W + 4))
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     # ── Data ──────────────────────────────────────────────────────────────────
@@ -122,24 +137,41 @@ class SemesterPanel:
     def _save(self):
         save_data(self.data, self.data_file)
 
-    # ── Table render ──────────────────────────────────────────────────────────
+    # ── Table render (single shared grid) ─────────────────────────────────────
     def _render_table(self):
         for w in self.table_frame.winfo_children():
             w.destroy()
         self._refresh_summary()
         courses = self.sem.get("courses", [])
 
-        hdr = tk.Frame(self.table_frame, bg=SURFACE0)
-        hdr.pack(fill=tk.X)
-        for ci, (label, width) in enumerate(self.COL_DEFS):
-            tk.Label(hdr, text=label, bg=SURFACE0, fg=ACCENT,
-                     font=("Segoe UI", 9, "bold"),
-                     width=width // 7, pady=8, padx=4,
-                     wraplength=width - 6, justify=tk.CENTER,
-                     ).grid(row=0, column=ci, sticky="nsew", padx=1)
-            hdr.columnconfigure(ci, minsize=width)
-        tk.Frame(self.table_frame, bg=ACCENT, height=2).pack(fill=tk.X)
+        # ── One frame, one grid — all rows share the same column definitions ──
+        tbl = tk.Frame(self.table_frame, bg=BG)
+        tbl.pack(fill=tk.BOTH, expand=True)
 
+        num_cols = len(self.COL_DEFS)
+        for ci, (_, width) in enumerate(self.COL_DEFS):
+            # Column 1 (Course Name) gets any extra horizontal space
+            tbl.columnconfigure(ci, minsize=width,
+                                weight=1 if ci == 1 else 0)
+
+        gr = 0  # current grid row
+
+        # ── Header row ────────────────────────────────────────────────────────
+        for ci, (label, width) in enumerate(self.COL_DEFS):
+            tk.Label(tbl, text=label, bg=SURFACE0, fg=ACCENT,
+                     font=("Segoe UI", 9, "bold"),
+                     pady=8, padx=4,
+                     wraplength=max(width - 8, 20),
+                     justify=tk.CENTER,
+                     ).grid(row=gr, column=ci, sticky="nsew", padx=1, ipadx=0)
+        gr += 1
+
+        # Thick accent separator under header
+        tk.Frame(tbl, bg=ACCENT, height=2).grid(
+            row=gr, column=0, columnspan=num_cols, sticky="ew")
+        gr += 1
+
+        # ── Group courses by base module ──────────────────────────────────────
         by_base: dict = {}
         for course in courses:
             b = course.get("base_module", "Other")
@@ -147,138 +179,144 @@ class SemesterPanel:
 
         row_num = 1
         for base, group in by_base.items():
-            sec = tk.Frame(self.table_frame, bg=SURFACE1, pady=2)
-            sec.pack(fill=tk.X, pady=(8, 0))
+            tot  = sum(c.get("credits", 0) for c in group)
+            done = sum(c.get("credits", 0) for c in group if c.get("exam_given"))
+
+            # Section header spans all columns
+            sec = tk.Frame(tbl, bg=SURFACE1, pady=2)
+            sec.grid(row=gr, column=0, columnspan=num_cols,
+                     sticky="ew", pady=(8, 0))
             tk.Label(sec, text=f"  {base}", bg=SURFACE1, fg=FG,
                      font=("Segoe UI", 10, "bold"), pady=3).pack(side=tk.LEFT)
-            tot  = sum(c.get("credits", 0) for c in group)
-            done = sum(c.get("credits", 0)
-                       for c in group if c.get("exam_given"))
             tk.Label(sec, text=f"{done}/{tot} ECTS", bg=SURFACE1,
                      fg=GREEN if done >= tot else YELLOW,
                      font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=12)
-            for ci, course in enumerate(group):
-                self._render_course_row(row_num, ci, course,
-                                        bg=SURFACE0 if ci % 2 == 0 else BG)
+            gr += 1
+
+            for ci_c, course in enumerate(group):
+                row_bg = SURFACE0 if ci_c % 2 == 0 else BG
+                self._place_course_row(tbl, gr, row_num, ci_c, course, row_bg)
+                gr += 1
                 row_num += 1
 
-        tk.Frame(self.table_frame, bg=SURFACE1, height=2).pack(
-            fill=tk.X, pady=6)
-        tot_frame = tk.Frame(self.table_frame, bg=SURFACE0)
-        tot_frame.pack(fill=tk.X)
+        # ── Grand-total row ───────────────────────────────────────────────────
+        tk.Frame(tbl, bg=SURFACE1, height=2).grid(
+            row=gr, column=0, columnspan=num_cols, sticky="ew", pady=6)
+        gr += 1
+
         total_credits = sum(c.get("credits", 0) for c in courses)
         done_credits  = sum(c.get("credits", 0)
                             for c in courses if c.get("exam_given"))
-        for i, (text, width) in enumerate(self.COL_DEFS):
-            if i == 1:
-                t, fg_c = f"Total — {row_num - 1} courses", FG
-            elif i == 4:
+        for ci, (_, _w) in enumerate(self.COL_DEFS):
+            if ci == 1:
+                t, fg_c = f"  Total — {row_num - 1} courses", FG
+            elif ci == 4:
                 t, fg_c = str(total_credits), ACCENT
-            elif i == 6:
+            elif ci == 6:
                 t, fg_c = (str(done_credits),
                            GREEN if done_credits == total_credits else YELLOW)
             else:
                 t, fg_c = "", FG
-            tk.Label(tot_frame, text=t, bg=SURFACE0, fg=fg_c,
+            tk.Label(tbl, text=t, bg=SURFACE0, fg=fg_c,
                      font=("Segoe UI", 10, "bold"),
-                     width=width // 7, pady=6, padx=4,
-                     ).grid(row=0, column=i, sticky="nsew", padx=1)
-            tot_frame.columnconfigure(i, minsize=width)
+                     pady=6, padx=4, anchor="w",
+                     ).grid(row=gr, column=ci, sticky="nsew", padx=1)
 
         rebind_scroll_children(self.canvas, self.table_frame,
                                h_canvas=self.canvas)
+        self._on_resize()
 
-    def _render_course_row(self, row_num, ci, course, bg=BG):
-        row   = tk.Frame(self.table_frame, bg=bg)
-        row.pack(fill=tk.X)
+    # ── Place one course into the shared grid ──────────────────────────────────
+    def _place_course_row(self, tbl, gr, row_num, ci, course, bg=BG):
         color   = course.get("color", COURSE_COLORS[ci % len(COURSE_COLORS)])
         credits = course.get("credits", 0)
         exam    = course.get("exam_given", False)
 
-        def make_lbl(text, width, fg_c=FG, bold=False):
-            return tk.Label(row, text=text, bg=bg, fg=fg_c,
-                            font=("Segoe UI", 9, "bold" if bold else "normal"),
-                            width=width // 7, pady=5, padx=4, anchor="w")
+        # Col 0 — colour-dot + row number
+        no_f = tk.Frame(tbl, bg=bg)
+        no_f.grid(row=gr, column=0, sticky="nsew", padx=1)
+        tk.Label(no_f, bg=color, width=3).pack(side=tk.LEFT, fill=tk.Y, padx=(2, 4))
+        tk.Label(no_f, text=str(row_num), bg=bg, fg=OVERLAY,
+                 font=("Segoe UI", 8), pady=5).pack(side=tk.LEFT)
 
-        no_frame = tk.Frame(row, bg=bg)
-        no_frame.grid(row=0, column=0, sticky="nsew", padx=1)
-        tk.Label(no_frame, bg=color, width=3, height=1).pack(
-            side=tk.LEFT, padx=2)
-        tk.Label(no_frame, text=str(row_num), bg=bg, fg=OVERLAY,
-                 font=("Segoe UI", 8)).pack(side=tk.LEFT)
-        row.columnconfigure(0, minsize=self.COL_DEFS[0][1])
-
-        name_lbl = tk.Label(row, text=course.get("name", ""), bg=bg,
-                            fg=color, font=("Segoe UI", 9, "bold"),
-                            width=self.COL_DEFS[1][1] // 7,
-                            pady=5, padx=4, anchor="w",
-                            wraplength=self.COL_DEFS[1][1] - 8,
+        # Col 1 — course name (double-click to edit)
+        name_lbl = tk.Label(tbl, text=course.get("name", ""),
+                            bg=bg, fg=color,
+                            font=("Segoe UI", 9, "bold"),
+                            pady=5, padx=6, anchor="w",
+                            wraplength=self.COL_DEFS[1][1] - 10,
                             justify=tk.LEFT)
-        name_lbl.grid(row=0, column=1, sticky="nsew", padx=1)
+        name_lbl.grid(row=gr, column=1, sticky="nsew", padx=1)
         name_lbl.bind("<Double-Button-1>",
                       lambda e, c=course: self._edit_course_dialog(c))
-        row.columnconfigure(1, minsize=self.COL_DEFS[1][1])
 
-        make_lbl(course.get("base_module", ""),
-                 self.COL_DEFS[2][1], SUBTEXT).grid(
-            row=0, column=2, sticky="nsew", padx=1)
-        row.columnconfigure(2, minsize=self.COL_DEFS[2][1])
+        # Col 2 — base module
+        tk.Label(tbl, text=course.get("base_module", ""),
+                 bg=bg, fg=SUBTEXT, font=("Segoe UI", 9),
+                 pady=5, padx=4, anchor="w",
+                 ).grid(row=gr, column=2, sticky="nsew", padx=1)
 
-        make_lbl(course.get("specific_module", ""),
-                 self.COL_DEFS[3][1], SUBTEXT).grid(
-            row=0, column=3, sticky="nsew", padx=1)
-        row.columnconfigure(3, minsize=self.COL_DEFS[3][1])
+        # Col 3 — specific module
+        tk.Label(tbl, text=course.get("specific_module", ""),
+                 bg=bg, fg=SUBTEXT, font=("Segoe UI", 9),
+                 pady=5, padx=4, anchor="w",
+                 ).grid(row=gr, column=3, sticky="nsew", padx=1)
 
-        make_lbl(str(credits), self.COL_DEFS[4][1], ACCENT, bold=True).grid(
-            row=0, column=4, sticky="nsew", padx=1)
-        row.columnconfigure(4, minsize=self.COL_DEFS[4][1])
+        # Col 4 — credits
+        tk.Label(tbl, text=str(credits),
+                 bg=bg, fg=ACCENT, font=("Segoe UI", 9, "bold"),
+                 pady=5, padx=4, anchor="center",
+                 ).grid(row=gr, column=4, sticky="nsew", padx=1)
 
+        # Col 5 — exam checkbox
         exam_var = tk.BooleanVar(value=exam)
-        exam_bg  = "#1a3a1a" if exam else bg
-        cb = tk.Checkbutton(row, variable=exam_var, bg=exam_bg,
-                            selectcolor=SURFACE1, activebackground=bg,
-                            cursor="hand2",
-                            command=lambda v=exam_var, c=course, r=row:
-                            self._toggle_exam(c, v, r))
-        cb.grid(row=0, column=5, sticky="nsew", padx=1)
-        row.columnconfigure(5, minsize=self.COL_DEFS[5][1])
+        cb_bg    = "#1a3a1a" if exam else bg
+        cb_f     = tk.Frame(tbl, bg=cb_bg)
+        cb_f.grid(row=gr, column=5, sticky="nsew", padx=1)
+        tk.Checkbutton(
+            cb_f, variable=exam_var,
+            bg=cb_bg, selectcolor=SURFACE1, activebackground=bg,
+            cursor="hand2",
+            command=lambda v=exam_var, c=course: self._toggle_exam(c, v),
+        ).pack(expand=True)
 
-        obtainable = credits if exam else 0
-        make_lbl(str(obtainable), self.COL_DEFS[6][1],
-                 GREEN if exam else OVERLAY).grid(
-            row=0, column=6, sticky="nsew", padx=1)
-        row.columnconfigure(6, minsize=self.COL_DEFS[6][1])
+        # Col 6 — credits obtained
+        obtained = credits if exam else 0
+        tk.Label(tbl, text=str(obtained),
+                 bg=bg, fg=GREEN if exam else OVERLAY,
+                 font=("Segoe UI", 9),
+                 pady=5, padx=4, anchor="center",
+                 ).grid(row=gr, column=6, sticky="nsew", padx=1)
 
+        # Cols 7-10 — date/time fields (click to inline-edit)
         for col_i, field_key in enumerate(
                 ["exam_date", "exam_time", "alt_date", "alt_time"], start=7):
-            val = course.get(field_key, "")
-            lbl = tk.Label(row, text=val or "—",
-                           bg=bg, fg=SUBTEXT if not val else FG,
+            val = course.get(field_key, "") or ""
+            lbl = tk.Label(tbl, text=val if val else "—",
+                           bg=bg, fg=FG if val else SUBTEXT,
                            font=("Segoe UI", 8),
-                           width=self.COL_DEFS[col_i][1] // 7,
                            pady=5, padx=4, anchor="w", cursor="hand2")
-            lbl.grid(row=0, column=col_i, sticky="nsew", padx=1)
+            lbl.grid(row=gr, column=col_i, sticky="nsew", padx=1)
             lbl.bind("<Button-1>",
                      lambda e, c=course, k=field_key, l=lbl:
                      self._inline_edit(c, k, l))
-            row.columnconfigure(col_i, minsize=self.COL_DEFS[col_i][1])
 
-        info_lbl = tk.Label(row, text=course.get("additional_info", "") or "",
+        # Col 11 — additional info (click to inline-edit)
+        info_lbl = tk.Label(tbl,
+                            text=course.get("additional_info", "") or "",
                             bg=bg, fg=OVERLAY, font=("Segoe UI", 8),
-                            width=self.COL_DEFS[11][1] // 7,
                             pady=5, padx=4, anchor="w", cursor="hand2",
                             wraplength=self.COL_DEFS[11][1] - 8)
-        info_lbl.grid(row=0, column=11, sticky="nsew", padx=1)
+        info_lbl.grid(row=gr, column=11, sticky="nsew", padx=1)
         info_lbl.bind("<Button-1>",
                       lambda e, c=course, l=info_lbl:
                       self._inline_edit(c, "additional_info", l))
-        row.columnconfigure(11, minsize=self.COL_DEFS[11][1])
 
-        tk.Button(row, text="✕", bg=bg, fg=RED, font=("Segoe UI", 9),
+        # Col 12 — delete button
+        tk.Button(tbl, text="✕", bg=bg, fg=RED, font=("Segoe UI", 9),
                   relief=tk.FLAT, cursor="hand2",
                   command=lambda c=course: self._delete_course(c),
-                  ).grid(row=0, column=12, sticky="nsew", padx=1)
-        row.columnconfigure(12, minsize=self.COL_DEFS[12][1])
+                  ).grid(row=gr, column=12, sticky="nsew", padx=1)
 
     def _refresh_summary(self):
         for w in self.summary_bar.winfo_children():
@@ -304,7 +342,7 @@ class SemesterPanel:
                  font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=6)
 
     # ── Actions ───────────────────────────────────────────────────────────────
-    def _toggle_exam(self, course, var, row):
+    def _toggle_exam(self, course, var):
         course["exam_given"] = var.get()
         self._save()
         self._render_table()
@@ -333,9 +371,9 @@ class SemesterPanel:
             win.destroy()
             self._render_table()
 
-        e.bind("<Return>", commit)
+        e.bind("<Return>",   commit)
         e.bind("<FocusOut>", commit)
-        e.bind("<Escape>", lambda e: win.destroy())
+        e.bind("<Escape>",   lambda e: win.destroy())
 
     def _delete_course(self, course):
         if messagebox.askyesno(
@@ -354,7 +392,7 @@ class SemesterPanel:
         self._course_form_dialog(course)
 
     def _course_form_dialog(self, existing=None):
-        base_modules    = get_base_modules(self.data)
+        base_modules     = get_base_modules(self.data)
         specific_modules = get_specific_modules(self.data)
 
         win = tk.Toplevel(self.frame)
@@ -390,7 +428,8 @@ class SemesterPanel:
 
         e = existing or {}
         name_var  = tk.StringVar(value=e.get("name", ""))
-        base_var  = tk.StringVar(value=e.get("base_module", base_modules[0] if base_modules else ""))
+        base_var  = tk.StringVar(value=e.get("base_module",
+                                             base_modules[0] if base_modules else ""))
         spec_var  = tk.StringVar(value=e.get("specific_module", ""))
         cred_var  = tk.StringVar(value=str(e.get("credits", 5)))
         exam_var  = tk.BooleanVar(value=e.get("exam_given", False))
@@ -475,7 +514,8 @@ class SemesterPanel:
                 credits = int(cred_var.get())
             except ValueError:
                 messagebox.showwarning("Bad Value",
-                                       "Credits must be an integer.", parent=win)
+                                       "Credits must be an integer.",
+                                       parent=win)
                 return
             fields = dict(
                 name=name, base_module=base_var.get(),
