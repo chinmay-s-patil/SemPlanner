@@ -1,11 +1,6 @@
 """planner/hub.py — HubApp: single-window host with overlay drawer.
 
-Blur backdrop
--------------
-When the hamburger (☰) is clicked the app takes a Pillow screenshot of the
-body area, applies a GaussianBlur, and renders it as a Canvas backdrop behind
-the drawer — giving a frosted-glass effect.  Falls back to a stipple overlay
-if the screenshot fails (e.g. Wayland compositor without XWayland).
+Added: save_data_dialog / Save As button in drawer and utility area.
 """
 
 import os
@@ -39,7 +34,7 @@ class HubApp:
         self._current       = None
         self._drawer_open   = False
         self._panels: dict  = {}
-        self._blur_photo    = None   # keep Pillow PhotoImage reference
+        self._blur_photo    = None
 
         self._build_topbar()
         self._build_body()
@@ -81,7 +76,6 @@ class HubApp:
             "semester":     SemesterPanel(self._panels_host, self),
         }
 
-        # Blur backdrop canvas — sits behind the drawer
         self._backdrop = tk.Canvas(
             self._body, highlightthickness=0, cursor="arrow")
         self._backdrop.bind("<Button-1>", lambda e: self._close_drawer())
@@ -118,6 +112,10 @@ class HubApp:
         util.pack(fill=tk.X, padx=12)
         self._small_btn(util, "📂  Load Data",
                          self.load_data_dialog).pack(fill=tk.X, pady=3)
+        self._small_btn(util, "💾  Save Data",
+                         self.save_data_dialog).pack(fill=tk.X, pady=3)
+        self._small_btn(util, "💾  Save As…",
+                         self.save_as_dialog).pack(fill=tk.X, pady=3)
         self._small_btn(util, "➕  New Semester",
                          self.new_semester_dialog).pack(fill=tk.X, pady=3)
 
@@ -212,7 +210,6 @@ class HubApp:
         if self._drawer_open:
             return
 
-        # ── 1. Screenshot BEFORE placing backdrop ─────────────────────────────
         self.root.update_idletasks()
         self._blur_photo = None
         try:
@@ -226,11 +223,10 @@ class HubApp:
             img     = ImageGrab.grab(bbox=(x, y, x + w, y + h))
             blurred = img.filter(ImageFilter.GaussianBlur(14))
             photo   = ImageTk.PhotoImage(blurred)
-            self._blur_photo = photo          # prevent GC
+            self._blur_photo = photo
         except Exception:
             pass
 
-        # ── 2. Place backdrop and draw blurred image (or fallback) ────────────
         self._backdrop.place(x=0, y=0, relwidth=1, relheight=1)
         tk.Misc.lift(self._backdrop)
         self._backdrop.update_idletasks()
@@ -240,18 +236,14 @@ class HubApp:
         self._backdrop.delete("all")
 
         if self._blur_photo:
-            self._backdrop.create_image(0, 0, image=self._blur_photo,
-                                        anchor="nw")
-            # Subtle dark tint over the blur
+            self._backdrop.create_image(0, 0, image=self._blur_photo, anchor="nw")
             self._backdrop.create_rectangle(
                 0, 0, bw, bh, fill="#0D0D1A", stipple="gray25", outline="")
         else:
-            # Fallback: semi-transparent stipple only
             self._backdrop.configure(bg="#0D0D1A")
             self._backdrop.create_rectangle(
                 0, 0, bw, bh, fill="#0D0D1A", stipple="gray50", outline="")
 
-        # ── 3. Lift drawer on top ─────────────────────────────────────────────
         self._drawer.place(x=0, y=0, width=self.DRAWER_W, relheight=1)
         self._drawer.lift()
         self._drawer_open = True
@@ -274,6 +266,34 @@ class HubApp:
             self.data      = load_data(path)
             if self._current:
                 self._panels[self._current].reload()
+
+    def save_data_dialog(self):
+        """Save to current file immediately."""
+        try:
+            save_data(self.data, self.data_file)
+            messagebox.showinfo("Saved",
+                                f"Saved to:\n{self.data_file}",
+                                parent=self.root)
+        except Exception as ex:
+            messagebox.showerror("Save Error", str(ex), parent=self.root)
+
+    def save_as_dialog(self):
+        """Save to a new file location."""
+        path = filedialog.asksaveasfilename(
+            title="Save data as…",
+            defaultextension=".json",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
+            initialfile=os.path.basename(self.data_file),
+        )
+        if path:
+            try:
+                save_data(self.data, path)
+                self.data_file = path
+                messagebox.showinfo("Saved",
+                                    f"Saved to:\n{path}",
+                                    parent=self.root)
+            except Exception as ex:
+                messagebox.showerror("Save Error", str(ex), parent=self.root)
 
     def new_semester_dialog(self):
         win = tk.Toplevel(self.root)

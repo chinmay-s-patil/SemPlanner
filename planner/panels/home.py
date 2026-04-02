@@ -6,7 +6,7 @@ from tkinter import ttk
 
 from planner.constants import (
     BG, SURFACE0, SURFACE1, MANTLE, FG, SUBTEXT, OVERLAY,
-    ACCENT, GREEN, YELLOW, MAUVE, CRUST,
+    ACCENT, GREEN, YELLOW, MAUVE, CRUST, TEAL,
 )
 
 
@@ -31,6 +31,8 @@ class HomePanel:
             side=tk.LEFT, padx=14, pady=14)
         btn_frame = tk.Frame(topbar, bg=CRUST)
         btn_frame.pack(side=tk.RIGHT, padx=14, pady=12)
+        self._btn(btn_frame, "💾  Save Data", SURFACE1, FG,
+                  self.hub.save_data_dialog).pack(side=tk.LEFT, padx=(0, 6))
         self._btn(btn_frame, "📂  Load Data", SURFACE1, FG,
                   self.hub.load_data_dialog).pack(side=tk.LEFT, padx=(0, 6))
         self._btn(btn_frame, "➕  New Semester", GREEN, CRUST,
@@ -100,7 +102,11 @@ class HomePanel:
         for w in self.summary_frame.winfo_children():
             w.destroy()
         req       = self.hub.data.get("requirements", {})
-        total_req = sum(v.get("total_required", 0) for v in req.values())
+
+        # Use 120 as total (95 fixed + 25 flexible)
+        from planner.panels.requirements import TOTAL_PROGRAM_CREDITS
+        total_req = TOTAL_PROGRAM_CREDITS
+
         completed = 0
         for sem in self.hub.data.get("semesters", []):
             for c in sem.get("courses", []):
