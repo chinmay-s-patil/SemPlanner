@@ -1,11 +1,11 @@
 """planner/hub.py — HubApp: single-window host with overlay drawer.
 
-Added: save_data_dialog / Save As button in drawer and utility area.
+Added: File menu (Export/Import semester as JSON, XLSX, CSV + template download).
 """
 
 import os
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from planner.constants import (
     BG, SURFACE0, SURFACE1, CRUST, MANTLE, FG, SUBTEXT, OVERLAY,
@@ -47,6 +47,7 @@ class HubApp:
         self._topbar.pack(fill=tk.X)
         self._topbar.pack_propagate(False)
 
+        # Hamburger
         ham = tk.Button(
             self._topbar, text="☰", bg=CRUST, fg=FG,
             font=("Segoe UI", 16), relief=tk.FLAT, cursor="hand2",
@@ -56,10 +57,75 @@ class HubApp:
         )
         ham.pack(side=tk.LEFT)
 
+        # ── File menu button (replaces the old static title) ──────────────────
+        self._file_btn = tk.Button(
+            self._topbar, text="File  ▾", bg=CRUST, fg=FG,
+            font=("Segoe UI", 10, "bold"), relief=tk.FLAT, cursor="hand2",
+            padx=12, pady=4, activebackground=SURFACE0,
+            activeforeground=ACCENT, bd=0,
+            command=self._show_file_menu,
+        )
+        self._file_btn.pack(side=tk.LEFT)
+
+        # Thin separator
+        tk.Frame(self._topbar, bg=SURFACE1, width=1).pack(
+            side=tk.LEFT, fill=tk.Y, pady=10, padx=6)
+
+        # Current panel title (secondary)
         self._title_lbl = tk.Label(
             self._topbar, text="Academic Hub",
-            bg=CRUST, fg=FG, font=("Segoe UI", 13, "bold"))
-        self._title_lbl.pack(side=tk.LEFT, padx=8)
+            bg=CRUST, fg=SUBTEXT, font=("Segoe UI", 10))
+        self._title_lbl.pack(side=tk.LEFT, padx=6)
+
+    # ── File menu ─────────────────────────────────────────────────────────────
+    def _show_file_menu(self):
+        m = tk.Menu(
+            self.root, tearoff=0,
+            bg=SURFACE0, fg=FG,
+            activebackground=ACCENT, activeforeground=CRUST,
+            font=("Segoe UI", 9),
+            bd=0, relief=tk.FLAT,
+        )
+
+        def _sub():
+            return tk.Menu(
+                m, tearoff=0,
+                bg=SURFACE0, fg=FG,
+                activebackground=ACCENT, activeforeground=CRUST,
+                font=("Segoe UI", 9),
+                bd=0, relief=tk.FLAT,
+            )
+
+        # ── Export submenu ────────────────────────────────────────────────────
+        exp = _sub()
+        exp.add_command(label="As JSON…",  command=self.export_semester_json)
+        exp.add_command(label="As XLSX…",  command=self.export_semester_xlsx)
+        exp.add_command(label="As CSV…",   command=self.export_semester_csv)
+
+        # ── Import submenu ────────────────────────────────────────────────────
+        imp = _sub()
+        imp.add_command(label="From JSON…",  command=self.import_semester_json)
+        imp.add_command(label="From XLSX…",  command=self.import_semester_xlsx)
+        imp.add_command(label="From CSV…",   command=self.import_semester_csv)
+
+        m.add_cascade(label="Export Semester  ▶", menu=exp)
+        m.add_cascade(label="Import Semester  ▶", menu=imp)
+        m.add_separator()
+        m.add_command(label="📥  Download XLSX Template…",
+                      command=self.download_template)
+        m.add_separator()
+        m.add_command(label="📂  Load Data File…",  command=self.load_data_dialog)
+        m.add_command(label="💾  Save Data",         command=self.save_data_dialog)
+        m.add_command(label="💾  Save Data As…",     command=self.save_as_dialog)
+        m.add_separator()
+        m.add_command(label="➕  New Semester",       command=self.new_semester_dialog)
+
+        x = self._file_btn.winfo_rootx()
+        y = self._file_btn.winfo_rooty() + self._file_btn.winfo_height()
+        try:
+            m.tk_popup(x, y)
+        finally:
+            m.grab_release()
 
     # ── Body ──────────────────────────────────────────────────────────────────
     def _build_body(self):
@@ -256,7 +322,10 @@ class HubApp:
         self._blur_photo = None
         self._drawer_open = False
 
-    # ── Data actions ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # Data actions (load / save)
+    # ─────────────────────────────────────────────────────────────────────────
+
     def load_data_dialog(self):
         path = filedialog.askopenfilename(
             title="Open data.json",
@@ -268,7 +337,6 @@ class HubApp:
                 self._panels[self._current].reload()
 
     def save_data_dialog(self):
-        """Save to current file immediately."""
         try:
             save_data(self.data, self.data_file)
             messagebox.showinfo("Saved",
@@ -278,7 +346,6 @@ class HubApp:
             messagebox.showerror("Save Error", str(ex), parent=self.root)
 
     def save_as_dialog(self):
-        """Save to a new file location."""
         path = filedialog.asksaveasfilename(
             title="Save data as…",
             defaultextension=".json",
@@ -349,3 +416,258 @@ class HubApp:
                   font=("Segoe UI", 9, "bold"), relief=tk.FLAT,
                   cursor="hand2", padx=10, pady=4,
                   command=create).pack(pady=14)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Semester picker helper
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _pick_semester_dialog(self, title="Select Semester") -> dict | None:
+        """Show a small dialog to choose which semester to act on."""
+        sems = self.data.get("semesters", [])
+        if not sems:
+            messagebox.showwarning("No Semesters",
+                                   "No semesters in the current data file.",
+                                   parent=self.root)
+            return None
+        if len(sems) == 1:
+            return sems[0]
+
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry("340x170")
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        win.grab_set()
+
+        result: list = [None]
+
+        tk.Label(win, text=title, bg=BG, fg=FG,
+                 font=("Segoe UI", 12, "bold")).pack(pady=(18, 10))
+
+        var = tk.StringVar(value=sems[-1]["name"])
+        cb  = ttk.Combobox(win, textvariable=var,
+                           values=[s["name"] for s in sems],
+                           state="readonly", font=("Segoe UI", 10), width=28)
+        cb.pack(padx=30, fill=tk.X)
+
+        def confirm():
+            result[0] = next(
+                (s for s in sems if s["name"] == var.get()), None)
+            win.destroy()
+
+        tk.Button(win, text="Continue", bg=ACCENT, fg=CRUST,
+                  font=("Segoe UI", 9, "bold"), relief=tk.FLAT,
+                  cursor="hand2", padx=14, pady=5,
+                  command=confirm).pack(pady=16)
+
+        win.wait_window()
+        return result[0]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Export
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def export_semester_json(self):
+        sem = self._pick_semester_dialog("Export Semester — choose semester")
+        if not sem:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export Semester as JSON",
+            defaultextension=".json",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
+            initialfile=f"{sem['name']}.json",
+        )
+        if path:
+            try:
+                from planner.utils.export_import_utils import export_semester_json as _exp
+                _exp(sem, path)
+                messagebox.showinfo(
+                    "Exported",
+                    f"Semester '{sem['name']}' exported to:\n{path}",
+                    parent=self.root)
+            except Exception as ex:
+                messagebox.showerror("Export Error", str(ex), parent=self.root)
+
+    def export_semester_xlsx(self):
+        sem = self._pick_semester_dialog("Export Semester — choose semester")
+        if not sem:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export Semester as XLSX",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("All Files", "*.*")],
+            initialfile=f"{sem['name']}.xlsx",
+        )
+        if path:
+            try:
+                from planner.utils.export_import_utils import export_semester_xlsx as _exp
+                _exp(sem, path)
+                messagebox.showinfo(
+                    "Exported",
+                    f"Semester '{sem['name']}' exported to:\n{path}",
+                    parent=self.root)
+            except Exception as ex:
+                messagebox.showerror("Export Error", str(ex), parent=self.root)
+
+    def export_semester_csv(self):
+        sem = self._pick_semester_dialog("Export Semester — choose semester")
+        if not sem:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export Semester as CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV File", "*.csv"), ("All Files", "*.*")],
+            initialfile=f"{sem['name']}.csv",
+        )
+        if path:
+            try:
+                from planner.utils.export_import_utils import export_semester_csv as _exp
+                _exp(sem, path)
+                messagebox.showinfo(
+                    "Exported",
+                    f"Semester '{sem['name']}' exported to:\n{path}",
+                    parent=self.root)
+            except Exception as ex:
+                messagebox.showerror("Export Error", str(ex), parent=self.root)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Import
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def import_semester_json(self):
+        path = filedialog.askopenfilename(
+            title="Import Semester from JSON",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
+        )
+        if path:
+            try:
+                from planner.utils.export_import_utils import import_semester_json as _imp
+                self._merge_imported_semester(_imp(path))
+            except Exception as ex:
+                messagebox.showerror("Import Error", str(ex), parent=self.root)
+
+    def import_semester_xlsx(self):
+        path = filedialog.askopenfilename(
+            title="Import Semester from XLSX",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("All Files", "*.*")],
+        )
+        if path:
+            try:
+                from planner.utils.export_import_utils import import_semester_xlsx as _imp
+                self._merge_imported_semester(_imp(path))
+            except Exception as ex:
+                messagebox.showerror("Import Error", str(ex), parent=self.root)
+
+    def import_semester_csv(self):
+        path = filedialog.askopenfilename(
+            title="Import Semester from CSV",
+            filetypes=[("CSV File", "*.csv"), ("All Files", "*.*")],
+        )
+        if path:
+            try:
+                from planner.utils.export_import_utils import import_semester_csv as _imp
+                self._merge_imported_semester(_imp(path))
+            except Exception as ex:
+                messagebox.showerror("Import Error", str(ex), parent=self.root)
+
+    def _merge_imported_semester(self, sem: dict):
+        """Confirm names then add or replace the semester in self.data."""
+        existing       = self.data.get("semesters", [])
+        existing_names = {s["name"] for s in existing}
+
+        win = tk.Toplevel(self.root)
+        win.title("Import Semester")
+        win.geometry("400x230")
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        win.grab_set()
+
+        tk.Label(win, text="Import Semester",
+                 bg=BG, fg=FG,
+                 font=("Segoe UI", 13, "bold")).pack(pady=(16, 4))
+
+        frm = tk.Frame(win, bg=BG)
+        frm.pack(fill=tk.X, padx=30)
+        frm.columnconfigure(1, weight=1)
+
+        name_var = tk.StringVar(value=sem.get("name", "Imported"))
+        disp_var = tk.StringVar(value=sem.get("display_name", "Imported Semester"))
+
+        def _entry_row(r, label, var):
+            tk.Label(frm, text=label, bg=BG, fg=SUBTEXT,
+                     font=("Segoe UI", 9)).grid(
+                row=r, column=0, sticky="w", pady=4)
+            tk.Entry(frm, textvariable=var, bg=SURFACE0, fg=FG,
+                     insertbackground=FG, relief=tk.FLAT,
+                     font=("Segoe UI", 10), highlightthickness=1,
+                     highlightcolor=ACCENT, highlightbackground=SURFACE1,
+                     ).grid(row=r, column=1, sticky="ew", pady=4, padx=(10, 0))
+
+        _entry_row(0, "Short name:",   name_var)
+        _entry_row(1, "Display name:", disp_var)
+
+        tk.Label(frm, text=f"  {len(sem.get('courses', []))} courses will be imported",
+                 bg=BG, fg=SUBTEXT,
+                 font=("Segoe UI", 8, "italic")).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        def do_import():
+            n = name_var.get().strip()
+            d = disp_var.get().strip()
+            if not n:
+                messagebox.showwarning("Missing",
+                                       "Short name is required.", parent=win)
+                return
+            sem["name"]         = n
+            sem["display_name"] = d
+
+            if n in existing_names:
+                if not messagebox.askyesno(
+                    "Overwrite?",
+                    f"Semester '{n}' already exists. Overwrite it?",
+                    parent=win,
+                ):
+                    return
+                for i, s in enumerate(self.data["semesters"]):
+                    if s["name"] == n:
+                        self.data["semesters"][i] = sem
+                        break
+            else:
+                self.data.setdefault("semesters", []).append(sem)
+
+            save_data(self.data, self.data_file)
+            if self._current:
+                self._panels[self._current].reload()
+            win.destroy()
+            messagebox.showinfo(
+                "Imported",
+                f"Semester '{n}' imported successfully.",
+                parent=self.root)
+
+        tk.Button(win, text="Import", bg=ACCENT, fg=CRUST,
+                  font=("Segoe UI", 9, "bold"), relief=tk.FLAT,
+                  cursor="hand2", padx=14, pady=5,
+                  command=do_import).pack(pady=14)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Template
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def download_template(self):
+        path = filedialog.asksaveasfilename(
+            title="Save XLSX Template",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("All Files", "*.*")],
+            initialfile="semester_template.xlsx",
+        )
+        if path:
+            try:
+                from planner.utils.export_import_utils import export_template_xlsx
+                export_template_xlsx(path)
+                messagebox.showinfo(
+                    "Template Saved",
+                    f"Template saved to:\n{path}\n\n"
+                    "Edit the rows, then use File → Import Semester → From XLSX…",
+                    parent=self.root)
+            except Exception as ex:
+                messagebox.showerror("Error", str(ex), parent=self.root)
