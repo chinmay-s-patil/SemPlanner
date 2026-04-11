@@ -1,22 +1,27 @@
 """planner/panels/timetable.py — Weekly timetable view.
 
-Key fix: rebind_scroll_children() is called at the end of refresh_visibility()
-so the Show/Hide course list can actually be scrolled after it is populated.
+Changes:
+- Added "Credits" tab showing live credit breakdown filtered by visibility.
+  Visible courses are counted; hidden courses shown separately in a collapsed
+  footer. Groups by base module → specific module, with "" displayed as
+  "⚠ Unassigned".
 """
 
 import json
 import tkinter as tk
 from tkinter import ttk, messagebox
+from collections import defaultdict
 
 from planner.constants import (
     BG, SURFACE0, SURFACE1, CRUST, MANTLE, FG, SUBTEXT, OVERLAY,
-    ACCENT, GREEN, MAUVE, COURSE_COLORS,
+    ACCENT, GREEN, MAUVE, RED, YELLOW, TEAL, COURSE_COLORS,
 )
 from planner.utils.io_utils import get_slot_types, get_days, get_day_full
 from planner.utils.math_utils import parse_time, hex_darken, hex_blend, assign_columns
 from planner.utils.scroll_utils import bind_scroll, rebind_scroll_children
 
 _DEFAULT_SLOT_TYPES = ["Lecture", "Tutorial", "Exercise", "Lab", "Help Session", "Other"]
+_UNASSIGNED_LABEL   = "⚠  Unassigned"
 
 
 class TimetablePanel:
@@ -32,6 +37,8 @@ class TimetablePanel:
         self._next_id    = 0
         self._tab_btns: list = []
         self.type_vars: dict = {}
+        # Track collapse state for each base-module group in Credits tab
+        self._credits_collapsed: dict = {}
         self._init_styles()
         self._build_ui()
 
@@ -108,12 +115,18 @@ class TimetablePanel:
 
         self.tab_options    = tk.Frame(self._tca, bg=BG)
         self.tab_visibility = tk.Frame(self._tca, bg=BG)
-        for frame, label in [(self.tab_options, "Options"),
-                             (self.tab_visibility, "Courses")]:
+        self.tab_credits    = tk.Frame(self._tca, bg=BG)
+
+        for frame, label in [
+            (self.tab_options,    "Options"),
+            (self.tab_visibility, "Courses"),
+            (self.tab_credits,    "Credits"),
+        ]:
             self._make_tab_btn(frame, label)
 
         self._build_options_tab()
         self._build_visibility_tab()
+        self._build_credits_tab()
         self._select_tab(self.tab_options, self._tab_btns[0])
 
     # ── Data ──────────────────────────────────────────────────────────────────
@@ -139,6 +152,7 @@ class TimetablePanel:
         self.hidden_ids = {e["_id"] for e in flat if e.get("_hidden")}
         self.draw_timetable()
         self.refresh_visibility()
+        self.refresh_credits()
 
     def _new_id(self):
         self._next_id += 1
@@ -156,6 +170,18 @@ class TimetablePanel:
             course["hidden"] = course["name"] in hidden_names
         with open(self.data_file, "w", encoding="utf-8") as f:
             json.dump(self.data, f, indent=2, ensure_ascii=False)
+
+    def _hidden_course_names(self) -> set:
+        """Return the set of course names that are currently hidden."""
+        return {e["_course_name"] for e in self.courses
+                if e["_id"] in self.hidden_ids}
+
+    def _get_sem_courses(self) -> list:
+        """Return the raw course dicts for the selected semester."""
+        name = self.sem_var.get()
+        sem  = next((s for s in self.data.get("semesters", [])
+                     if s["name"] == name), None)
+        return sem.get("courses", []) if sem else []
 
     # ── Tab rail ──────────────────────────────────────────────────────────────
     def _make_tab_btn(self, frame, label):
@@ -279,7 +305,257 @@ class TimetablePanel:
         self.vis_canvas.itemconfigure(
             self._vwin, width=self.vis_canvas.winfo_width())
 
-    # ── Draw ──────────────────────────────────────────────────────────────────
+    # ── Credits tab ───────────────────────────────────────────────────────────
+    def _build_credits_tab(self):
+        """Build the static skeleton for the Credits tab (scrollable)."""
+        f = self.tab_credits
+
+        # Summary strip at top
+        self._cred_summary = tk.Frame(f, bg=SURFACE0, pady=6)
+        self._cred_summary.pack(fill=tk.X)
+
+        # Scrollable body
+        wrap = tk.Frame(f, bg=BG)
+        wrap.pack(fill=tk.BOTH, expand=True)
+
+        vsb = tk.Scrollbar(wrap, orient=tk.VERTICAL, bg=SURFACE1,
+                           troughcolor=SURFACE0, relief=tk.FLAT,
+                           highlightthickness=0)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._cred_canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0,
+                                      yscrollcommand=vsb.set)
+        self._cred_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.configure(command=self._cred_canvas.yview)
+
+        self._cred_frame = tk.Frame(self._cred_canvas, bg=BG)
+        self._cwin = self._cred_canvas.create_window(
+            (0, 0), window=self._cred_frame, anchor="nw")
+        self._cred_frame.bind("<Configure>", self._cred_resize)
+        self._cred_canvas.bind("<Configure>", self._cred_resize)
+        bind_scroll(self._cred_canvas)
+
+    def _cred_resize(self, _=None):
+        self._cred_canvas.configure(
+            scrollregion=self._cred_canvas.bbox("all"))
+        self._cred_canvas.itemconfigure(
+            self._cwin, width=self._cred_canvas.winfo_width())
+
+    def refresh_credits(self):
+        """Rebuild the Credits tab content based on current visibility."""
+        # ── Gather data ───────────────────────────────────────────────────────
+        hidden_names = self._hidden_course_names()
+        sem_courses  = self._get_sem_courses()
+
+        # Group courses: {base: {specific: [course_dict, ...]}}
+        groups: dict = defaultdict(lambda: defaultdict(list))
+        for c in sem_courses:
+            base = c.get("base_module", "") or ""
+            spec = c.get("specific_module", "") or ""
+            groups[base][spec].append(c)
+
+        # ── Totals ────────────────────────────────────────────────────────────
+        total_all  = sum(c.get("credits", 0) for c in sem_courses)
+        total_vis  = sum(c.get("credits", 0) for c in sem_courses
+                         if c.get("name") not in hidden_names)
+        total_hid  = total_all - total_vis
+
+        # ── Summary strip ─────────────────────────────────────────────────────
+        for w in self._cred_summary.winfo_children():
+            w.destroy()
+
+        tk.Label(self._cred_summary, text="  Visible credits:",
+                 bg=SURFACE0, fg=SUBTEXT,
+                 font=("Segoe UI", 8)).pack(side=tk.LEFT)
+
+        pct = int(total_vis / total_all * 100) if total_all else 0
+        pb  = tk.Frame(self._cred_summary, bg=SURFACE1, height=8, width=80)
+        pb.pack(side=tk.LEFT, padx=6, pady=2)
+        pb.pack_propagate(False)
+        if pct:
+            tk.Frame(pb, bg=ACCENT,
+                     width=int(80 * pct / 100)).pack(side=tk.LEFT, fill=tk.Y)
+
+        tk.Label(self._cred_summary,
+                 text=f"{total_vis} / {total_all}",
+                 bg=SURFACE0, fg=FG,
+                 font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
+
+        if total_hid:
+            tk.Label(self._cred_summary,
+                     text=f"  ({total_hid} hidden)",
+                     bg=SURFACE0, fg=OVERLAY,
+                     font=("Segoe UI", 8)).pack(side=tk.LEFT)
+
+        # ── Body ──────────────────────────────────────────────────────────────
+        for w in self._cred_frame.winfo_children():
+            w.destroy()
+
+        # Determine a consistent color for each base module
+        sorted_bases = sorted(groups.keys(),
+                              key=lambda b: (b == "", b.lower()))
+        base_colors: dict = {}
+        ci = 0
+        for b in sorted_bases:
+            if b == "":
+                base_colors[b] = RED
+            else:
+                base_colors[b] = COURSE_COLORS[ci % len(COURSE_COLORS)]
+                ci += 1
+
+        for base in sorted_bases:
+            specs     = groups[base]
+            base_lbl  = base if base else _UNASSIGNED_LABEL
+            bcolor    = base_colors[base]
+
+            base_vis  = sum(c.get("credits", 0)
+                            for sp_courses in specs.values()
+                            for c in sp_courses
+                            if c.get("name") not in hidden_names)
+            base_all  = sum(c.get("credits", 0)
+                            for sp_courses in specs.values()
+                            for c in sp_courses)
+
+            collapsed = self._credits_collapsed.get(base, False)
+            self._render_credits_base_section(
+                base, base_lbl, bcolor, specs,
+                base_vis, base_all, hidden_names, collapsed)
+
+        rebind_scroll_children(self._cred_canvas, self._cred_frame)
+        self._cred_resize()
+
+    def _render_credits_base_section(self, base_key, base_lbl, color,
+                                     specs: dict, base_vis, base_all,
+                                     hidden_names: set, collapsed: bool):
+        """Render one collapsible base-module block inside the credits body."""
+        outer = tk.Frame(self._cred_frame, bg=BG)
+        outer.pack(fill=tk.X, pady=(4, 0))
+
+        # ── Section header ────────────────────────────────────────────────────
+        hdr = tk.Frame(outer, bg=SURFACE1, pady=0)
+        hdr.pack(fill=tk.X)
+
+        arrow_lbl = tk.Label(hdr,
+                             text="▶" if collapsed else "▼",
+                             bg=SURFACE1, fg=color,
+                             font=("Segoe UI", 8, "bold"), cursor="hand2",
+                             padx=4, pady=4)
+        arrow_lbl.pack(side=tk.LEFT)
+
+        tk.Label(hdr, text=base_lbl, bg=SURFACE1, fg=color,
+                 font=("Segoe UI", 9, "bold"),
+                 pady=4).pack(side=tk.LEFT)
+
+        # Mini progress pill
+        pill_bg = SURFACE0
+        pill_f  = tk.Frame(hdr, bg=pill_bg, padx=4, pady=1)
+        pill_f.pack(side=tk.RIGHT, padx=6, pady=3)
+        pct_b = int(base_vis / base_all * 100) if base_all else 0
+        fg_c  = GREEN if base_vis == base_all else (YELLOW if base_vis > 0 else OVERLAY)
+        tk.Label(pill_f,
+                 text=f"{base_vis}/{base_all} ECTS",
+                 bg=pill_bg, fg=fg_c,
+                 font=("Segoe UI", 8, "bold")).pack()
+
+        # ── Detail body (collapsible) ─────────────────────────────────────────
+        body = tk.Frame(outer, bg=BG)
+        if not collapsed:
+            body.pack(fill=tk.X)
+            self._render_credits_body(body, specs, hidden_names, color)
+
+        def toggle(_e=None):
+            self._credits_collapsed[base_key] = \
+                not self._credits_collapsed.get(base_key, False)
+            if self._credits_collapsed[base_key]:
+                body.pack_forget()
+                arrow_lbl.configure(text="▶")
+            else:
+                body.pack(fill=tk.X)
+                self._render_credits_body(body, specs, hidden_names, color)
+                arrow_lbl.configure(text="▼")
+            rebind_scroll_children(self._cred_canvas, self._cred_frame)
+            self._cred_resize()
+
+        for w in (arrow_lbl, hdr):
+            w.bind("<Button-1>", toggle)
+
+    def _render_credits_body(self, parent, specs: dict, hidden_names: set, color):
+        """Render specific-module sub-rows and individual courses."""
+        for w in parent.winfo_children():
+            w.destroy()
+
+        sorted_specs = sorted(specs.keys(),
+                              key=lambda s: (s == "", s.lower()))
+
+        for spec in sorted_specs:
+            courses  = specs[spec]
+            spec_lbl = spec if spec else "(none)"
+
+            vis_cred = sum(c.get("credits", 0) for c in courses
+                           if c.get("name") not in hidden_names)
+            all_cred = sum(c.get("credits", 0) for c in courses)
+
+            # Specific module sub-header
+            sh = tk.Frame(parent, bg=SURFACE0, pady=0)
+            sh.pack(fill=tk.X, pady=(3, 0), padx=2)
+
+            tk.Label(sh, text=f"   {spec_lbl}",
+                     bg=SURFACE0, fg=SUBTEXT,
+                     font=("Segoe UI", 8, "italic"),
+                     pady=3, anchor="w").pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            pct_s = int(vis_cred / all_cred * 100) if all_cred else 0
+            fg_s  = (GREEN  if vis_cred == all_cred
+                     else YELLOW if vis_cred > 0
+                     else OVERLAY)
+            tk.Label(sh, text=f"{vis_cred}/{all_cred}",
+                     bg=SURFACE0, fg=fg_s,
+                     font=("Segoe UI", 8, "bold"),
+                     pady=3, padx=6).pack(side=tk.RIGHT)
+
+            # Individual course rows
+            for ri, course in enumerate(courses):
+                name    = course.get("name", "")
+                credits = course.get("credits", 0)
+                ccolor  = course.get("color", color)
+                hidden  = name in hidden_names
+
+                row_bg  = BG if ri % 2 == 0 else SURFACE0
+                row     = tk.Frame(parent, bg=row_bg, pady=0)
+                row.pack(fill=tk.X, padx=2)
+
+                # Color dot
+                tk.Frame(row, bg=ccolor, width=3).pack(
+                    side=tk.LEFT, fill=tk.Y, padx=(6, 0))
+
+                # Hidden eye indicator
+                eye = tk.Label(row,
+                               text="  " if not hidden else "🚫",
+                               bg=row_bg, fg=OVERLAY,
+                               font=("Segoe UI", 7),
+                               pady=3, padx=2)
+                eye.pack(side=tk.LEFT)
+
+                # Course name (greyed if hidden)
+                name_fg = OVERLAY if hidden else FG
+                tk.Label(row,
+                         text=name,
+                         bg=row_bg, fg=name_fg,
+                         font=("Segoe UI", 8),
+                         pady=3, padx=2, anchor="w",
+                         wraplength=140,
+                         justify=tk.LEFT,
+                         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+                # Credits badge
+                cred_fg = OVERLAY if hidden else ACCENT
+                tk.Label(row,
+                         text=str(credits),
+                         bg=row_bg, fg=cred_fg,
+                         font=("Segoe UI", 8, "bold"),
+                         pady=3, padx=6).pack(side=tk.RIGHT)
+
+    # ── Draw timetable ────────────────────────────────────────────────────────
     def draw_timetable(self):
         self.canvas.delete("all")
 
@@ -559,6 +835,7 @@ class TimetablePanel:
                 self.vis_vars[cid].set(False)
         self._save_hidden()
         self.draw_timetable()
+        self.refresh_credits()
 
     # ── Visibility ────────────────────────────────────────────────────────────
     def refresh_visibility(self):
@@ -592,7 +869,6 @@ class TimetablePanel:
                 tk.Label(col_f, text=bm, bg=BG, fg=OVERLAY,
                          font=("Segoe UI", 7)).pack(anchor="w")
 
-        # ── KEY FIX: re-bind scroll on all newly created widgets ──────────────
         rebind_scroll_children(self.vis_canvas, self.vis_frame)
         self._vis_resize()
 
@@ -603,6 +879,7 @@ class TimetablePanel:
             self.hidden_ids.add(cid)
         self._save_hidden()
         self.draw_timetable()
+        self.refresh_credits()
 
     def show_all(self):
         self.hidden_ids.clear()
@@ -610,6 +887,7 @@ class TimetablePanel:
             v.set(True)
         self._save_hidden()
         self.draw_timetable()
+        self.refresh_credits()
 
     def hide_all(self):
         for cid, v in self.vis_vars.items():
@@ -617,6 +895,7 @@ class TimetablePanel:
             self.hidden_ids.add(cid)
         self._save_hidden()
         self.draw_timetable()
+        self.refresh_credits()
 
     # ── Widget helpers ────────────────────────────────────────────────────────
     def _ph(self, parent, text, top=14):
