@@ -1,6 +1,7 @@
 """planner/hub.py — HubApp: single-window host with overlay drawer.
 
 Added: File menu (Export/Import semester as JSON, XLSX, CSV + template download).
+Added: Actions menu with Reload Data.
 """
 
 import os
@@ -9,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from planner.constants import (
     BG, SURFACE0, SURFACE1, CRUST, MANTLE, FG, SUBTEXT, OVERLAY,
-    ACCENT, GREEN, MAUVE,
+    ACCENT, GREEN, MAUVE, RED, YELLOW, TEAL,
 )
 from planner.utils.io_utils import load_data, save_data
 from planner.panels.home         import HomePanel
@@ -47,62 +48,99 @@ class HubApp:
         self._topbar.pack(fill=tk.X)
         self._topbar.pack_propagate(False)
 
-        # Hamburger
+        # Left: hamburger + brand
+        left = tk.Frame(self._topbar, bg=CRUST)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+
         ham = tk.Button(
-            self._topbar, text="☰", bg=CRUST, fg=FG,
+            left, text="☰", bg=CRUST, fg=FG,
             font=("Segoe UI", 16), relief=tk.FLAT, cursor="hand2",
             padx=14, pady=4, activebackground=SURFACE0,
             activeforeground=ACCENT, bd=0,
             command=self._toggle_drawer,
         )
-        ham.pack(side=tk.LEFT)
+        ham.pack(side=tk.LEFT, fill=tk.Y)
 
-        # ── File menu button (replaces the old static title) ──────────────────
-        self._file_btn = tk.Button(
-            self._topbar, text="File  ▾", bg=CRUST, fg=FG,
-            font=("Segoe UI", 10, "bold"), relief=tk.FLAT, cursor="hand2",
-            padx=12, pady=4, activebackground=SURFACE0,
-            activeforeground=ACCENT, bd=0,
-            command=self._show_file_menu,
+        # Thin accent divider after hamburger
+        tk.Frame(left, bg=SURFACE1, width=1).pack(
+            side=tk.LEFT, fill=tk.Y, pady=10)
+
+        # Brand / logo text
+        tk.Label(
+            left, text="🎓  Academic Hub",
+            bg=CRUST, fg=ACCENT,
+            font=("Segoe UI", 10, "bold"),
+            padx=12,
+        ).pack(side=tk.LEFT, fill=tk.Y)
+
+        # Another divider before menu buttons
+        tk.Frame(left, bg=SURFACE1, width=1).pack(
+            side=tk.LEFT, fill=tk.Y, pady=10)
+
+        # ── Menu buttons (File, Actions) ──────────────────────────────────────
+        menu_area = tk.Frame(self._topbar, bg=CRUST)
+        menu_area.pack(side=tk.LEFT, fill=tk.Y, padx=(4, 0))
+
+        self._file_btn = self._topbar_menu_btn(
+            menu_area, "  File  ▾  ", self._show_file_menu)
+        self._file_btn.pack(side=tk.LEFT, fill=tk.Y)
+
+        self._actions_btn = self._topbar_menu_btn(
+            menu_area, "  Actions  ▾  ", self._show_actions_menu, color=TEAL)
+        self._actions_btn.pack(side=tk.LEFT, fill=tk.Y)
+
+        # ── Right side: current panel breadcrumb + data-file chip ─────────────
+        right = tk.Frame(self._topbar, bg=CRUST)
+        right.pack(side=tk.RIGHT, fill=tk.Y, padx=12)
+
+        # Data-file chip
+        self._file_chip = tk.Label(
+            right,
+            text=f"  📄  {os.path.basename(self.data_file)}  ",
+            bg=SURFACE0, fg=SUBTEXT,
+            font=("Segoe UI", 8),
+            relief=tk.FLAT, padx=6, pady=2,
+            cursor="hand2",
         )
-        self._file_btn.pack(side=tk.LEFT)
+        self._file_chip.pack(side=tk.RIGHT, pady=12, padx=(4, 0))
+        self._file_chip.bind("<Button-1>", lambda e: self.load_data_dialog())
 
-        # Thin separator
-        tk.Frame(self._topbar, bg=SURFACE1, width=1).pack(
-            side=tk.LEFT, fill=tk.Y, pady=10, padx=6)
+        tk.Frame(right, bg=SURFACE1, width=1).pack(
+            side=tk.RIGHT, fill=tk.Y, pady=10, padx=6)
 
-        # Current panel title (secondary)
+        # Panel breadcrumb label
         self._title_lbl = tk.Label(
-            self._topbar, text="Academic Hub",
-            bg=CRUST, fg=SUBTEXT, font=("Segoe UI", 10))
-        self._title_lbl.pack(side=tk.LEFT, padx=6)
+            right, text="",
+            bg=CRUST, fg=SUBTEXT,
+            font=("Segoe UI", 9),
+        )
+        self._title_lbl.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _topbar_menu_btn(self, parent, text, cmd, color=FG):
+        """Create a flat topbar menu button with hover highlight."""
+        btn = tk.Button(
+            parent, text=text, bg=CRUST, fg=color,
+            font=("Segoe UI", 9, "bold"), relief=tk.FLAT, cursor="hand2",
+            pady=0, activebackground=SURFACE0,
+            activeforeground=color, bd=0,
+            command=cmd,
+        )
+        btn.bind("<Enter>", lambda e: btn.configure(bg=SURFACE0))
+        btn.bind("<Leave>", lambda e: btn.configure(bg=CRUST))
+        return btn
 
     # ── File menu ─────────────────────────────────────────────────────────────
     def _show_file_menu(self):
-        m = tk.Menu(
-            self.root, tearoff=0,
-            bg=SURFACE0, fg=FG,
-            activebackground=ACCENT, activeforeground=CRUST,
-            font=("Segoe UI", 9),
-            bd=0, relief=tk.FLAT,
-        )
+        m = self._make_menu()
 
         def _sub():
-            return tk.Menu(
-                m, tearoff=0,
-                bg=SURFACE0, fg=FG,
-                activebackground=ACCENT, activeforeground=CRUST,
-                font=("Segoe UI", 9),
-                bd=0, relief=tk.FLAT,
-            )
+            return self._make_menu(parent=m)
 
-        # ── Export submenu ────────────────────────────────────────────────────
         exp = _sub()
         exp.add_command(label="As JSON…",  command=self.export_semester_json)
         exp.add_command(label="As XLSX…",  command=self.export_semester_xlsx)
         exp.add_command(label="As CSV…",   command=self.export_semester_csv)
 
-        # ── Import submenu ────────────────────────────────────────────────────
         imp = _sub()
         imp.add_command(label="From JSON…",  command=self.import_semester_json)
         imp.add_command(label="From XLSX…",  command=self.import_semester_xlsx)
@@ -120,12 +158,54 @@ class HubApp:
         m.add_separator()
         m.add_command(label="➕  New Semester",       command=self.new_semester_dialog)
 
-        x = self._file_btn.winfo_rootx()
-        y = self._file_btn.winfo_rooty() + self._file_btn.winfo_height()
+        self._popup_menu(m, self._file_btn)
+
+    # ── Actions menu ──────────────────────────────────────────────────────────
+    def _show_actions_menu(self):
+        m = self._make_menu(accent=TEAL)
+
+        m.add_command(label="🔄  Reload Data",
+                      command=self.reload_data)
+        m.add_separator()
+        m.add_command(label="💾  Save Data",
+                      command=self.save_data_dialog)
+        m.add_command(label="➕  New Semester",
+                      command=self.new_semester_dialog)
+
+        self._popup_menu(m, self._actions_btn)
+
+    def _make_menu(self, parent=None, accent=ACCENT):
+        return tk.Menu(
+            parent or self.root, tearoff=0,
+            bg=SURFACE0, fg=FG,
+            activebackground=accent, activeforeground=CRUST,
+            font=("Segoe UI", 9),
+            bd=0, relief=tk.FLAT,
+        )
+
+    def _popup_menu(self, menu, btn):
+        x = btn.winfo_rootx()
+        y = btn.winfo_rooty() + btn.winfo_height()
         try:
-            m.tk_popup(x, y)
+            menu.tk_popup(x, y)
         finally:
-            m.grab_release()
+            menu.grab_release()
+
+    # ── Reload data ───────────────────────────────────────────────────────────
+    def reload_data(self):
+        """Re-read the current data file from disk and refresh the active panel."""
+        try:
+            self.data = load_data(self.data_file)
+            if self._current:
+                self._panels[self._current].reload()
+            # Flash the file chip green briefly as visual confirmation
+            self._file_chip.configure(bg="#1a3a1a", fg=GREEN)
+            self._file_chip.after(
+                600,
+                lambda: self._file_chip.configure(bg=SURFACE0, fg=SUBTEXT),
+            )
+        except Exception as ex:
+            messagebox.showerror("Reload Error", str(ex), parent=self.root)
 
     # ── Body ──────────────────────────────────────────────────────────────────
     def _build_body(self):
@@ -176,6 +256,8 @@ class HubApp:
 
         util = tk.Frame(self._drawer, bg=CRUST)
         util.pack(fill=tk.X, padx=12)
+        self._small_btn(util, "🔄  Reload Data",
+                         self.reload_data).pack(fill=tk.X, pady=3)
         self._small_btn(util, "📂  Load Data",
                          self.load_data_dialog).pack(fill=tk.X, pady=3)
         self._small_btn(util, "💾  Save Data",
@@ -246,7 +328,7 @@ class HubApp:
         panel.reload()
 
         titles = {
-            "home":         "Academic Hub",
+            "home":         "Home",
             "timetable":    "📅  Timetable",
             "requirements": "📋  Requirements",
             "semester":     "📊  Semester Credits",
@@ -333,6 +415,8 @@ class HubApp:
         if path:
             self.data_file = path
             self.data      = load_data(path)
+            self._file_chip.configure(
+                text=f"  📄  {os.path.basename(self.data_file)}  ")
             if self._current:
                 self._panels[self._current].reload()
 
@@ -356,6 +440,8 @@ class HubApp:
             try:
                 save_data(self.data, path)
                 self.data_file = path
+                self._file_chip.configure(
+                    text=f"  📄  {os.path.basename(self.data_file)}  ")
                 messagebox.showinfo("Saved",
                                     f"Saved to:\n{path}",
                                     parent=self.root)
@@ -422,7 +508,6 @@ class HubApp:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _pick_semester_dialog(self, title="Select Semester") -> dict | None:
-        """Show a small dialog to choose which semester to act on."""
         sems = self.data.get("semesters", [])
         if not sems:
             messagebox.showwarning("No Semesters",
@@ -571,7 +656,6 @@ class HubApp:
                 messagebox.showerror("Import Error", str(ex), parent=self.root)
 
     def _merge_imported_semester(self, sem: dict):
-        """Confirm names then add or replace the semester in self.data."""
         existing       = self.data.get("semesters", [])
         existing_names = {s["name"] for s in existing}
 
